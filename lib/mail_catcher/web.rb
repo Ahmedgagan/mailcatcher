@@ -12,7 +12,6 @@ module MailCatcher
 
     def initialize(mail: MailCatcher::Mail.new)
       super()
-
       @mail = mail
     end
 
@@ -37,7 +36,14 @@ module MailCatcher
 
     get "/messages" do
       content_type :json
-      JSON.generate(@mail.messages)
+      if Async::WebSocket::Adapters::Rack.websocket?(env)
+        puts "WebSockets connection opened..."
+        puts @mail
+        # puts env
+        # Async::WebSocket::ConnectResponse.new(request)
+      else
+        JSON.generate(@mail.messages)
+      end
     end
 
     delete "/messages" do

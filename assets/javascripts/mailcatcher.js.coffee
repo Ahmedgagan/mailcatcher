@@ -188,6 +188,7 @@ class MailCatcher
     $("#messages tbody tr").show()
 
   addMessage: (message) ->
+    console.log(message)
     $("<tr />").attr("data-message-id", message.id.toString())
       .append($("<td/>").text(message.sender or "No sender").toggleClass("blank", !message.sender))
       .append($("<td/>").text((message.recipients || []).join(", ") or "No receipients").toggleClass("blank", !message.recipients.length))
@@ -309,7 +310,7 @@ class MailCatcher
       @refreshInterval = setInterval (=> @refresh()), 1000
 
   resizeToSavedKey: "mailcatcherSeparatorHeight"
-
+  
   resizeTo: (height) ->
     $("#messages").css
       height: height - $("#messages").offset().top

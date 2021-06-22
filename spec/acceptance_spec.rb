@@ -6,7 +6,7 @@ require "socket"
 require "net/smtp"
 require "selenium-webdriver"
 
-SMTP_PORT = 10025
+SMTP_PORT = 1025
 HTTP_PORT = 10080
 
 # Start MailCatcher
@@ -56,6 +56,7 @@ describe MailCatcher do
   end
 
   before do
+    deliver_example("plainmail")
     selenium.navigate.to("http://127.0.0.1:#{HTTP_PORT}")
   end
 

@@ -1,8 +1,11 @@
+# frozen_string_literal: true
+
 require "json"
 require "mail"
 require "sqlite3"
+require "async/websocket/client"
 
-class MailCatcher::Mail
+module MailCatcher::Mail extend self
   def db
     @__db ||= begin
       SQLite3::Database.new(":memory:", :type_translation => true).tap do |db|
@@ -29,19 +32,28 @@ class MailCatcher::Mail
             charset TEXT,
             body BLOB,
             size INTEGER,
-            created_at DATETIME DEFAULT CURRENT_DATETIME
+            created_at DATETIME DEFAULT CURRENT_DATETIME,
+            FOREIGN KEY (message_id) REFERENCES message (id) ON DELETE CASCADE
           )
         SQL
+        db.foreign_keys = true
       end
     end
   end
 
   def add_message(message)
+    query = "INSERT INTO message (sender, recipients, subject, source, type, size, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))"
+    p 'complete'
+    p db.complete? query
+    p db
     @add_message_query ||= db.prepare("INSERT INTO message (sender, recipients, subject, source, type, size, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))")
-
+    p @add_message_query
+    p 'done'
     mail = Mail.new(message[:source])
-    @add_message_query.execute(message[:sender], JSON.generate(message[:recipients]), mail.subject, message[:source], mail.mime_type || "text/plain", message[:source].length)
+    result = @add_message_query.execute(message[:sender], JSON.generate(message[:recipients]), mail.subject, message[:source], mail.mime_type || "text/plain", message[:source].length)
+    p messages
     message_id = db.last_insert_row_id
+    p message_id
     parts = mail.all_parts
     parts = [mail] if parts.empty?
     parts.each do |part|
@@ -49,6 +61,26 @@ class MailCatcher::Mail
       # Only parts have CIDs, not mail
       cid = part.cid if part.respond_to? :cid
       add_message_part(message_id, cid, part.mime_type || "text/plain", part.attachment? ? 1 : 0, part.filename, part.charset, body, body.length)
+    end
+
+    Async do |task|
+      endpoint = Async::HTTP::Endpoint.parse('http://localhost:1080')
+
+      begin
+        Async::WebSocket::Client.connect(endpoint) do |connection|
+          message = message message_id
+
+          puts "Connected..."
+          p message
+          connection.write message
+          connection.flush
+          while message = connection.read
+            puts "> #{message.inspect}"
+          end
+        end
+      rescue Errno::ECONNREFUSED => e
+        p e
+      end
     end
   end
 
@@ -72,11 +104,18 @@ class MailCatcher::Mail
   end
 
   def message(id)
-    @message_query ||= db.prepare "SELECT * FROM message WHERE id = ? LIMIT 1"
+    @message_query ||= db.prepare "SELECT id, sender, recipients, subject, size, type, created_at FROM message WHERE id = ? LIMIT 1"
     row = @message_query.execute(id).next
+    p row
     row && Hash[row.fields.zip(row)].tap do |message|
       message["recipients"] &&= JSON.parse(message["recipients"])
     end
+  end
+
+  def message_source(id)
+    @message_source_query ||= db.prepare "SELECT source FROM message WHERE id = ? LIMIT 1"
+    row = @message_source_query.execute(id).next
+    row && row.first
   end
 
   def message_has_html?(id)
@@ -139,16 +178,21 @@ class MailCatcher::Mail
 
   def delete!
     @delete_all_messages_query ||= db.prepare "DELETE FROM message"
-    @delete_all_message_parts_query ||= db.prepare "DELETE FROM message_part"
-
-    @delete_all_messages_query.execute and
-    @delete_all_message_parts_query.execute
+    @delete_all_messages_query.execute
   end
 
   def delete_message!(message_id)
     @delete_messages_query ||= db.prepare "DELETE FROM message WHERE id = ?"
-    @delete_message_parts_query ||= db.prepare "DELETE FROM message_part WHERE message_id = ?"
-    @delete_messages_query.execute(message_id) and
-    @delete_message_parts_query.execute(message_id)
+    @delete_messages_query.execute(message_id)
+  end
+
+  def delete_older_messages!(count = MailCatcher.options[:messages_limit])
+    return if count.nil?
+    @older_messages_query ||= db.prepare "SELECT id FROM message WHERE id NOT IN (SELECT id FROM message ORDER BY created_at DESC LIMIT ?)"
+    @older_messages_query.execute(count).map do |row|
+      Hash[row.fields.zip(row)]
+    end.each do |message|
+      delete_message!(message["id"])
+    end
   end
 end

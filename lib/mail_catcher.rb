@@ -1,22 +1,29 @@
+#!/usr/bin/env -S falcon serve --bind http://127.0.0.1:7070 --count 1 -c
+gem "mail", "~> 2.3"
+gem "rack", "~> 2.2.3"
+gem "sinatra", "~> 2.1.0"
+gem "sqlite3", "~> 1.3"
+gem "falcon", "~> 0.39.1"
+gem "skinny", "~> 0.2.3"
+gem "async", "~> 1.25"
+gem "async-http", "~> 0.56.3"
+gem "async-io", "~> 1.32.1"
+gem "async-websocket", "~> 0.19.0"
+
 require "optparse"
 require "rbconfig"
 require "socket"
-
-require "async"
-require "async/reactor"
-require "async/io/address"
 require "async/io/address_endpoint"
-require "async/http/url_endpoint"
-require "falcon/adapters/rack"
-require "falcon/server"
-require "rack"
-
-require "mail_catcher/version"
+require "async/http/endpoint"
+require "async/websocket/adapters/rack"
+require "mail"
+require "falcon"
+require "/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/version.rb"
 
 module MailCatcher extend self
-  autoload :Mail, "mail_catcher/mail"
-  autoload :SMTP, "mail_catcher/smtp"
-  autoload :Web, "mail_catcher/web"
+  autoload :Mail, "/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/mail.rb"
+  autoload :SMTP, "/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/smtp.rb"
+  autoload :Web, "/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/web.rb"
 
   def which?(command)
     ENV["PATH"].split(File::PATH_SEPARATOR).any? do |directory|
@@ -150,36 +157,9 @@ module MailCatcher extend self
     if options[:verbose]
       Async.logger.level = Logger::DEBUG
     end
+    puts "==> #{http_url}"
 
     Async::Reactor.run do |task|
-      mail = MailCatcher::Mail.new
-
-      http_address = Async::IO::Address.tcp(options[:http_ip], options[:http_port])
-      http_endpoint = Async::IO::AddressEndpoint.new(http_address)
-      http_socket = rescue_port(options[:http_port]) { http_endpoint.bind }
-      puts "==> #{http_url}"
-
-      web = MailCatcher::Web.new(mail: mail)
-      rack_app = Rack::Builder.app do
-        map(options[:http_path]) { run web }
-        run lambda { |env| [302, {"Location" => MailCatcher.options[:http_path]}, []] }
-      end
-
-      http_endpoint = Async::HTTP::URLEndpoint.new(URI.parse(http_url), http_endpoint)
-      http_app = Falcon::Adapters::Rack.new(rack_app)
-      http_server = Falcon::Server.new(http_app, http_endpoint)
-
-      http_task = task.async do |task|
-        task.annotate "binding to #{http_socket.local_address.inspect}"
-
-        begin
-          http_socket.listen(Socket::SOMAXCONN)
-          http_socket.accept_each(task: task, &http_server.method(:accept))
-        ensure
-          http_socket.close
-        end
-      end
-
       smtp_address = Async::IO::Address.tcp(options[:smtp_ip], options[:smtp_port])
       smtp_endpoint = Async::IO::AddressEndpoint.new(smtp_address)
       smtp_socket = rescue_port(options[:smtp_port]) { smtp_endpoint.bind }
@@ -187,7 +167,7 @@ module MailCatcher extend self
 
       smtp_endpoint = MailCatcher::SMTP::URLEndpoint.new(URI.parse(smtp_url), smtp_endpoint)
       smtp_server = MailCatcher::SMTP::Server.new(smtp_endpoint) do |envelope|
-        mail.add_message(sender: envelope.sender, recipients: envelope.recipients, source: envelope.content)
+        MailCatcher::Mail.add_message(sender: envelope.sender, recipients: envelope.recipients, source: envelope.content)
       end
 
       smtp_task = task.async do |task|
@@ -200,6 +180,30 @@ module MailCatcher extend self
           smtp_socket.close
         end
       end
+
+      # Puma::CLI.new(['-C', '/Users/ahmedgagan/Rails Gem/mailcatcher/lib/config/http_config.rb']).run
+      http_address = Async::IO::Address.tcp(options[:http_ip], options[:http_port])
+      http_endpoint = Async::IO::AddressEndpoint.new(http_address)
+      # http_socket = rescue_port(options[:http_port]) { http_endpoint.bind }
+
+      # web = MailCatcher::Web.new(mail: mail)
+
+      http_endpoint = Async::HTTP::Endpoint.parse(http_url)
+
+      http_app = Falcon::Server.middleware(WebSocketApp)
+      http_server = Falcon::Server.new(http_app, http_endpoint)
+
+      http_server.run.each(&:wait)
+      # http_task = task.async do |task|
+      #   task.annotate "binding to #{http_socket.local_address.inspect}"
+
+      #   begin
+      #     p http_socket.listen(Socket::SOMAXCONN)
+      #     http_socket.accept_each(task: task, &http_server.method(:accept))
+      #   ensure
+      #     http_socket.close
+      #   end
+      # end
 
       if options[:browse]
         browse(http_url)
@@ -242,5 +246,26 @@ protected
       puts "==> #{http_url}"
       exit -1
     end
+  end
+end
+
+class WebSocketApp
+  def self.call(env)
+    web = MailCatcher::Web.new
+    rack_app = Rack::Builder.app do
+      map('/') { run web }
+      run ->(_env) { [302, { 'Location' => MailCatcher.options[:http_path] }, []] }
+    end
+
+    Async::WebSocket::Adapters::Rack.open(env, protocols: %w[ws]) do |connection|
+      # message = connection.read
+      # p "<<<<<<  #{message}"
+      # if message
+      hash = {"id"=>1, "sender"=>"<me@fromdomain.com>", "recipients"=>["<test@todomain.com>"], "subject"=>"SMTP e-mail test", "size"=>"140", "type"=>"text/plain", "created_at"=>"2021-06-22T11:24:53+00:00"}
+        connection.write hash
+      # end
+
+      # connection.close
+    end or rack_app.call(env)
   end
 end
