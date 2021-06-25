@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-require "sprockets"
-require "sprockets-sass"
-require "compass"
+require 'sprockets'
+require 'sprockets-sass'
+require 'compass'
 
 module MailCatcher
   module Web

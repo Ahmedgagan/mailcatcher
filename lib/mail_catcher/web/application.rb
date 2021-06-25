@@ -1,17 +1,19 @@
 # frozen_string_literal: true
 
-require "pathname"
-require "net/http"
-require "uri"
+require 'pathname'
+require 'net/http'
+require 'uri'
 
-require "sinatra"
-require "skinny"
+require 'sinatra'
+require 'skinny'
 
-require "mail_catcher/bus"
-require "mail_catcher/mail"
+require 'mail_catcher/bus'
+require 'mail_catcher/mail'
 
-class Sinatra::Request
-  include Skinny::Helpers
+module Sinatra
+  class Request
+    include Skinny::Helpers
+  end
 end
 
 module MailCatcher
@@ -19,14 +21,14 @@ module MailCatcher
     class Application < Sinatra::Base
       set :environment, MailCatcher.env
       set :prefix, MailCatcher.options[:http_path]
-      set :asset_prefix, File.join(prefix, "assets")
+      set :asset_prefix, File.join(prefix, 'assets')
       set :root, File.expand_path("#{__FILE__}/../../../..")
 
       if development?
-        require "sprockets-helpers"
+        require 'sprockets-helpers'
 
         configure do
-          require "mail_catcher/web/assets"
+          require 'mail_catcher/web/assets'
           Sprockets::Helpers.configure do |config|
             config.environment = Assets
             config.prefix      = settings.asset_prefix
@@ -47,11 +49,11 @@ module MailCatcher
         end
       end
 
-      get "/" do
+      get '/' do
         erb :index
       end
 
-      delete "/" do
+      delete '/' do
         if MailCatcher.quittable?
           MailCatcher.quit!
           status 204
@@ -60,59 +62,58 @@ module MailCatcher
         end
       end
 
-      get "/messages" do
+      get '/messages' do
         if request.websocket?
           request.websocket!(
-            :on_start => proc do |websocket|
+            on_start: proc do |websocket|
               bus_subscription = MailCatcher::Bus.subscribe do |message|
-                begin
-                  websocket.send_message(JSON.generate(message))
-                rescue => exception
-                  MailCatcher.log_exception("Error sending message through websocket", message, exception)
-                end
+                websocket.send_message(JSON.generate(message))
+              rescue StandardError => e
+                MailCatcher.log_exception('Error sending message through websocket', message, e)
               end
 
               websocket.on_close do |*|
                 MailCatcher::Bus.unsubscribe bus_subscription
               end
-            end)
+            end
+          )
         else
           content_type :json
           JSON.generate(Mail.messages)
         end
       end
 
-      delete "/messages" do
+      delete '/messages' do
         Mail.delete!
         status 204
       end
 
-      get "/messages/:id.json" do
+      get '/messages/:id.json' do
         id = params[:id].to_i
         if message = Mail.message(id)
           content_type :json
           JSON.generate(message.merge({
-            "formats" => [
-              "source",
-              ("html" if Mail.message_has_html? id),
-              ("plain" if Mail.message_has_plain? id)
-            ].compact,
-            "attachments" => Mail.message_attachments(id),
-          }))
+                                        'formats' => [
+                                          'source',
+                                          ('html' if Mail.message_has_html? id),
+                                          ('plain' if Mail.message_has_plain? id)
+                                        ].compact,
+                                        'attachments' => Mail.message_attachments(id)
+                                      }))
         else
           not_found
         end
       end
 
-      get "/messages/:id.html" do
+      get '/messages/:id.html' do
         id = params[:id].to_i
         if part = Mail.message_part_html(id)
-          content_type :html, :charset => (part["charset"] || "utf8")
+          content_type :html, charset: (part['charset'] || 'utf8')
 
-          body = part["body"]
+          body = part['body']
 
           # Rewrite body to link to embedded attachments served by cid
-          body.gsub! /cid:([^'"> ]+)/, "#{id}/parts/\\1"
+          body.gsub!(/cid:([^'"> ]+)/, "#{id}/parts/\\1")
 
           body
         else
@@ -120,48 +121,48 @@ module MailCatcher
         end
       end
 
-      get "/messages/:id.plain" do
+      get '/messages/:id.plain' do
         id = params[:id].to_i
         if part = Mail.message_part_plain(id)
-          content_type part["type"], :charset => (part["charset"] || "utf8")
-          part["body"]
+          content_type part['type'], charset: (part['charset'] || 'utf8')
+          part['body']
         else
           not_found
         end
       end
 
-      get "/messages/:id.source" do
+      get '/messages/:id.source' do
         id = params[:id].to_i
         if message_source = Mail.message_source(id)
-          content_type "text/plain"
+          content_type 'text/plain'
           message_source
         else
           not_found
         end
       end
 
-      get "/messages/:id.eml" do
+      get '/messages/:id.eml' do
         id = params[:id].to_i
         if message_source = Mail.message_source(id)
-          content_type "message/rfc822"
+          content_type 'message/rfc822'
           message_source
         else
           not_found
         end
       end
 
-      get "/messages/:id/parts/:cid" do
+      get '/messages/:id/parts/:cid' do
         id = params[:id].to_i
         if part = Mail.message_part_cid(id, params[:cid])
-          content_type part["type"], :charset => (part["charset"] || "utf8")
-          attachment part["filename"] if part["is_attachment"] == 1
-          body part["body"].to_s
+          content_type part['type'], charset: (part['charset'] || 'utf8')
+          attachment part['filename'] if part['is_attachment'] == 1
+          body part['body'].to_s
         else
           not_found
         end
       end
 
-      delete "/messages/:id" do
+      delete '/messages/:id' do
         id = params[:id].to_i
         if Mail.message(id)
           Mail.delete_message!(id)
