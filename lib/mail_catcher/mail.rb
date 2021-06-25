@@ -1,6 +1,5 @@
 # frozen_string_literal: true
 
-require "eventmachine"
 require "json"
 require "mail"
 require "sqlite3"
@@ -54,11 +53,6 @@ module MailCatcher::Mail extend self
       # Only parts have CIDs, not mail
       cid = part.cid if part.respond_to? :cid
       add_message_part(message_id, cid, part.mime_type || "text/plain", part.attachment? ? 1 : 0, part.filename, part.charset, body, body.length)
-    end
-
-    EventMachine.next_tick do
-      message = MailCatcher::Mail.message message_id
-      MailCatcher::Bus.push(type: "add", message: message)
     end
   end
 
@@ -156,19 +150,11 @@ module MailCatcher::Mail extend self
   def delete!
     @delete_all_messages_query ||= db.prepare "DELETE FROM message"
     @delete_all_messages_query.execute
-
-    EventMachine.next_tick do
-      MailCatcher::Bus.push(type: "clear")
-    end
   end
 
   def delete_message!(message_id)
     @delete_messages_query ||= db.prepare "DELETE FROM message WHERE id = ?"
     @delete_messages_query.execute(message_id)
-
-    EventMachine.next_tick do
-      MailCatcher::Bus.push(type: "remove", id: message_id)
-    end
   end
 
   def delete_older_messages!(count = MailCatcher.options[:messages_limit])
