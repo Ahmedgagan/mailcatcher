@@ -5,20 +5,61 @@ require 'net/http'
 require 'uri'
 
 require 'sinatra'
-require 'skinny'
+require 'async/websocket/adapters/rack'
 
-require 'mail_catcher/bus'
-require 'mail_catcher/mail'
-
-module Sinatra
-  class Request
-    include Skinny::Helpers
-  end
-end
+require '/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/mail'
+# require 'mail_catcher/mail'
 
 module MailCatcher
   module Web
     class Application < Sinatra::Base
+      def initialize
+        super
+        @connections = Set.new
+        @semaphore = Async::Semaphore.new(512)
+
+        @count = 0
+      end
+
+      def connect(connection)
+        @connections << connection
+
+        @count += 1
+
+        # if (@count % 10000).zero?
+        # 	# (full_mark: false, immediate_sweep: false)
+        # 	duration = Async::Clock.measure{GC.start}
+        # 	Console.logger.info(self) {"GC.start duration=#{duration.round(2)}s GC.count=#{GC.count} @connections.count=#{@connections.count}"}
+        # end
+      end
+
+      def each(&block)
+        @connections.each(&block)
+      end
+
+      def broadcast(message)
+        Console.logger.info "Broadcast: #{message.inspect}"
+        start_time = Async::Clock.now
+
+        @connections.each do |connection|
+          @semaphore.async do
+            begin
+              connection.write(message)
+              connection.flush
+            rescue IOError
+              self.disconnect(connection)
+            end
+          end
+        end
+
+        end_time = Async::Clock.now
+        Console.logger.info "Duration: #{(end_time - start_time).round(3)}s for #{@connections.count} connected clients."
+      end
+
+      def disconnect connection
+        @connections.delete(connection)
+      end
+
       set :environment, MailCatcher.env
       set :prefix, MailCatcher.options[:http_path]
       set :asset_prefix, File.join(prefix, 'assets')
@@ -28,7 +69,8 @@ module MailCatcher
         require 'sprockets-helpers'
 
         configure do
-          require 'mail_catcher/web/assets'
+          require '/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/web/assets'
+          # require 'mail_catcher/web/assets'
           Sprockets::Helpers.configure do |config|
             config.environment = Assets
             config.prefix      = settings.asset_prefix
@@ -63,20 +105,20 @@ module MailCatcher
       end
 
       get '/messages' do
-        if request.websocket?
-          request.websocket!(
-            on_start: proc do |websocket|
-              bus_subscription = MailCatcher::Bus.subscribe do |message|
-                websocket.send_message(JSON.generate(message))
-              rescue StandardError => e
-                MailCatcher.log_exception('Error sending message through websocket', message, e)
-              end
+        if Async::WebSocket::Adapters::Rack.websocket?(env)
+          puts 'WebSockets connection opened...'
+          Async::WebSocket::Adapters::Rack.open(env, protocols: %w[ws]) do |connection|
+            self.connect(connection)
 
-              websocket.on_close do |*|
-                MailCatcher::Bus.unsubscribe bus_subscription
+            begin
+              while message = connection.read
+                self.broadcast(message)
               end
+            rescue Protocol::WebSocket::ClosedError, IOError
+              self.disconnect(connection)
+              connection.close
             end
-          )
+          end
         else
           content_type :json
           JSON.generate(Mail.messages)

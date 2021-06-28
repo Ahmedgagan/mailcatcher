@@ -2,25 +2,42 @@
 
 # Apparently rubygems won't activate these on its own, so here we go. Let's
 # repeat the invention of Bundler all over again.
+gem 'async', '~> 1.25'
+gem 'async-http', '~> 0.56.3'
+gem 'async-io', '~> 1.32.1'
+gem 'async-websocket', '~> 0.19.0'
+gem 'falcon', '~> 0.39.1'
 gem 'mail', '~> 2.3'
 gem 'rack', '~> 1.5'
 gem 'sinatra', '~> 1.2'
 gem 'sqlite3', '~> 1.3'
-gem 'skinny', '~> 0.2.3'
 
 require 'open3'
 require 'optparse'
 require 'rbconfig'
+require 'socket'
+require 'async/io/address_endpoint'
+require 'async/http/endpoint'
+require 'async/websocket/adapters/rack'
+require 'async/io/shared_endpoint'
+require 'mail'
+require 'falcon'
 
-require 'mail_catcher/version'
+require '/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/version'
+require '/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/message'
+# require 'mail_catcher/version'
 
-module MailCatcher
-  module_function
+module MailCatcher extend self
+  # module_function
+  autoload :Mail, '/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/mail'
+  # autoload :Message, '/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/message'
+  autoload :SMTP, '/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/smtp'
+  autoload :Web, '/Users/ahmedgagan/Rails Gem/mailcatcher/lib/mail_catcher/web'
 
-  autoload :Bus, 'mail_catcher/bus'
-  autoload :Mail, 'mail_catcher/mail'
-  autoload :Smtp, 'mail_catcher/smtp'
-  autoload :Web, 'mail_catcher/web'
+  # autoload :Bus, 'mail_catcher/bus'
+  # autoload :Mail, 'mail_catcher/mail'
+  # autoload :Smtp, 'mail_catcher/smtp'
+  # autoload :Web, 'mail_catcher/web'
 
   def env
     ENV.fetch('MAILCATCHER_ENV', 'production')
@@ -187,9 +204,64 @@ module MailCatcher
     $stdout.sync = $stderr.sync = true unless options[:daemon]
 
     puts 'Starting MailCatcher'
+
+    Async.logger.level = Logger::DEBUG if options[:verbose]
+
+    Async::Reactor.run do |task|
+      smtp_address = Async::IO::Address.tcp(options[:smtp_ip], options[:smtp_port])
+      smtp_endpoint = Async::IO::AddressEndpoint.new(smtp_address)
+      smtp_socket = rescue_port(options[:smtp_port]) { smtp_endpoint.bind }
+      puts "==> #{smtp_url}"
+
+      smtp_endpoint = MailCatcher::SMTP::URLEndpoint.new(URI.parse(smtp_url), smtp_endpoint)
+      smtp_server = MailCatcher::SMTP::Server.new(smtp_endpoint) do |envelope|
+        MailCatcher::Mail.add_message(sender: envelope.sender, recipients: envelope.recipients,
+                                      source: envelope.content)
+      end
+
+      smtp_task = task.async do |task|
+        task.annotate "binding to #{smtp_socket.local_address.inspect}"
+
+        begin
+          smtp_socket.listen(Socket::SOMAXCONN)
+          smtp_socket.accept_each(task: task, &smtp_server.method(:accept))
+        ensure
+          smtp_socket.close
+        end
+      end
+
+      http_address = Async::IO::Address.tcp(options[:http_ip], options[:http_port])
+      http_endpoint = Async::IO::AddressEndpoint.new(http_address)
+
+      http_endpoint = Async::HTTP::Endpoint.parse(http_url)
+      http_app = Falcon::Server.middleware(Web)
+      http_server = Falcon::Server.new(http_app, http_endpoint)
+
+      http_server.run.each(&:wait)
+
+      browse(http_url) if options[:browse]
+
+      # Daemonize, if we should, but only after the servers have started.
+      if options[:daemon]
+        if quittable?
+          puts '*** MailCatcher runs as a daemon by default. Go to the web interface to quit.'
+        else
+          puts '*** MailCatcher is now running as a daemon that cannot be quit.'
+        end
+        Process.daemon
+      end
+    end
+  rescue Interrupt
+    # Cool story
   end
 
-  def quit!; end
+  def quit!
+    Async::Task.current.reactor.stop
+  end
+
+  def http_url
+    "http://#{@@options[:http_ip]}:#{@@options[:http_port]}#{@@options[:http_path]}"
+  end
 
   protected
 
@@ -197,20 +269,12 @@ module MailCatcher
     "smtp://#{@@options[:smtp_ip]}:#{@@options[:smtp_port]}"
   end
 
-  def http_url
-    "http://#{@@options[:http_ip]}:#{@@options[:http_port]}#{@@options[:http_path]}"
-  end
-
   def rescue_port(port)
     yield
-  rescue RuntimeError
-    if $ERROR_INFO.to_s =~ /\bno acceptor\b/
-      puts "~~> ERROR: Something's using port #{port}. Are you already running MailCatcher?"
-      puts "==> #{smtp_url}"
-      puts "==> #{http_url}"
-      exit(-1)
-    else
-      raise
-    end
+  rescue Errno::EADDRINUSE
+    puts "~~> ERROR: Something's using port #{port}. Are you already running MailCatcher?"
+    puts "==> #{smtp_url}"
+    puts "==> #{http_url}"
+    exit(-1)
   end
 end
