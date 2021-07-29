@@ -26,11 +26,33 @@ MailCatcher runs a super simple SMTP server which catches any message sent to it
 3. Go to http://127.0.0.1:1080/
 4. Send mail through smtp://127.0.0.1:1025
 
-Use `mailcatcher --help` to see the command line options. The brave can get the source from [the GitHub repository][mailcatcher-github].
+### Command Line Options
+
+Use `mailcatcher --help` to see the command line options.
+
+```
+Usage: mailcatcher [options]
+
+MailCatcher v0.8.0
+
+        --ip IP                      Set the ip address of both servers
+        --smtp-ip IP                 Set the ip address of the smtp server
+        --smtp-port PORT             Set the port of the smtp server
+        --http-ip IP                 Set the ip address of the http server
+        --http-port PORT             Set the port address of the http server
+        --messages-limit COUNT       Only keep up to COUNT most recent messages
+        --http-path PATH             Add a prefix to all HTTP paths
+        --no-quit                    Don't allow quitting the process
+    -f, --foreground                 Run in the foreground
+    -b, --browse                     Open web browser
+    -v, --verbose                    Be more verbose
+    -h, --help                       Display this help information
+        --version                    Display the current version
+```
 
 ### Ruby
 
-If you have trouble with the above commands, make sure you have [Ruby installed](https://www.ruby-lang.org/en/documentation/installation/):
+If you have trouble with the setup commands, make sure you have [Ruby installed](https://www.ruby-lang.org/en/documentation/installation/):
 
 ```
 ruby -v
@@ -47,7 +69,7 @@ gem install thin -v 1.5.1 -- --with-cflags="-Wno-error=implicit-function-declara
 
 ### Bundler
 
-Please don't put mailcatcher into your Gemfile. It will conflict with your applications gems at some point.
+Please don't put mailcatcher into your Gemfile. It will conflict with your application's gems at some point.
 
 Instead, pop a note in your README stating you use mailcatcher, and to run `gem install mailcatcher` then `mailcatcher` to get started.
 

@@ -1,36 +1,22 @@
 # frozen_string_literal: true
 
-# Apparently rubygems won't activate these on its own, so here we go. Let's
-# repeat the invention of Bundler all over again.
-gem "eventmachine", "1.0.9.1"
-gem "mail", "~> 2.3"
-gem "rack", "~> 1.5"
-gem "sinatra", "~> 1.2"
-gem "sqlite3", "~> 1.3"
-gem "thin", "~> 1.5.0"
-gem "skinny", "~> 0.2.3"
-
+require 'async/io/address_endpoint'
+require 'async/http/endpoint'
+require 'async/websocket/adapters/rack'
+require 'async/io/shared_endpoint'
+require 'falcon'
 require "open3"
 require "optparse"
 require "rbconfig"
-
-require "eventmachine"
-require "thin"
-
-module EventMachine
-  # Monkey patch fix for 10deb4
-  # See https://github.com/eventmachine/eventmachine/issues/569
-  def self.reactor_running?
-    (@reactor_running || false)
-  end
-end
+require 'socket'
+require 'mail'
 
 require "mail_catcher/version"
 
 module MailCatcher extend self
   autoload :Bus, "mail_catcher/bus"
   autoload :Mail, "mail_catcher/mail"
-  autoload :Smtp, "mail_catcher/smtp"
+  autoload :SMTP, "mail_catcher/smtp"
   autoload :Web, "mail_catcher/web"
 
   def env
@@ -47,16 +33,8 @@ module MailCatcher extend self
     end
   end
 
-  def mac?
-    RbConfig::CONFIG["host_os"] =~ /darwin/
-  end
-
   def windows?
     RbConfig::CONFIG["host_os"] =~ /mswin|mingw/
-  end
-
-  def macruby?
-    mac? and const_defined? :MACRUBY_VERSION
   end
 
   def browseable?
@@ -146,13 +124,6 @@ module MailCatcher extend self
           options[:quit] = false
         end
 
-        if mac?
-          parser.on("--[no-]growl") do |growl|
-            puts "Growl is no longer supported"
-            exit -2
-          end
-        end
-
         unless windows?
           parser.on("-f", "--foreground", "Run in the foreground") do
             options[:daemon] = false
@@ -175,7 +146,7 @@ module MailCatcher extend self
         end
 
         parser.on_tail("--version", "Display the current version") do
-          puts "mailcatcher #{VERSION}"
+          puts "MailCatcher v#{VERSION}"
           exit
         end
       end.parse!
@@ -196,75 +167,92 @@ module MailCatcher extend self
       $stdout.sync = $stderr.sync = true
     end
 
-    puts "Starting MailCatcher"
+    puts "Starting MailCatcher v#{VERSION}"
 
-    Thin::Logging.debug = development?
-    Thin::Logging.silent = !development?
+    Async.run do
+      @smtp_address = Async::IO::Address.tcp(options[:smtp_ip], options[:smtp_port])
+      @smtp_endpoint = Async::IO::AddressEndpoint.new(@smtp_address)
+      @smtp_socket = rescue_port(options[:smtp_port]) { @smtp_endpoint.bind }
+      puts "==> #{smtp_url}"
 
-    # One EventMachine loop...
-    EventMachine.run do
-      # Set up an SMTP server to run within EventMachine
-      rescue_port options[:smtp_port] do
-        EventMachine.start_server options[:smtp_ip], options[:smtp_port], Smtp
-        puts "==> #{smtp_url}"
-      end
-
-      # Let Thin set itself up inside our EventMachine loop
-      # (Skinny/WebSockets just works on the inside)
-      rescue_port options[:http_port] do
-        Thin::Server.start(options[:http_ip], options[:http_port], Web)
-        puts "==> #{http_url}"
-      end
-
-      # Open the web browser before detatching console
-      if options[:browse]
-        EventMachine.next_tick do
-          browse http_url
-        end
-      end
-
-      # Daemonize, if we should, but only after the servers have started.
-      if options[:daemon]
-        EventMachine.next_tick do
-          if quittable?
-            puts "*** MailCatcher runs as a daemon by default. Go to the web interface to quit."
-          else
-            puts "*** MailCatcher is now running as a daemon that cannot be quit."
-          end
-          Process.daemon
-        end
-      end
+      @http_address = Async::IO::Address.tcp(options[:http_ip], options[:http_port])
+      @http_endpoint = Async::IO::AddressEndpoint.new(@http_address)
+      @http_socket = rescue_port(options[:http_port]) { @http_endpoint.bind }
+      puts "==> #{http_url}"
     end
+
+    Async.logger.level = :debug if options[:verbose]
+
+    if options[:daemon]
+      if quittable?
+        puts "*** MailCatcher runs as a daemon by default. Go to the web interface to quit."
+      else
+        puts "*** MailCatcher is now running as a daemon that cannot be quit."
+      end
+      Process.daemon
+    end
+
+    Async::Reactor.run do |task|
+      smtp_endpoint = MailCatcher::SMTP::URLEndpoint.new(URI.parse(smtp_url), @smtp_endpoint)
+      smtp_server = MailCatcher::SMTP::Server.new(smtp_endpoint) do |envelope|
+        MailCatcher::Mail.add_message(sender: envelope.sender, recipients: envelope.recipients,
+                                      source: envelope.content)
+      end
+
+      smtp_task = task.async do |task|
+        task.annotate "binding to #{@smtp_socket.local_address.inspect}"
+
+        begin
+          @smtp_socket.listen(Socket::SOMAXCONN)
+          @smtp_socket.accept_each(task: task, &smtp_server.method(:accept))
+        ensure
+          @smtp_socket.close
+        end
+      end
+
+      http_endpoint = Async::HTTP::Endpoint.new(URI.parse(http_url), @http_endpoint)
+      http_app = Falcon::Adapters::Rack.new(Web.app)
+      http_server = Falcon::Server.new(http_app, http_endpoint)
+
+      task.async do |task|
+        task.annotate "binding to #{@http_socket.local_address.inspect}"
+
+        begin
+          @http_socket.listen(Socket::SOMAXCONN)
+          @http_socket.accept_each(task: task, &http_server.method(:accept))
+        ensure
+          @http_socket.close
+        end
+      end
+
+      browse(http_url) if options[:browse]
+    end
+  rescue Interrupt
+    # Cool story
   end
 
   def quit!
-    EventMachine.next_tick { EventMachine.stop_event_loop }
-  end
-
-protected
-
-  def smtp_url
-    "smtp://#{@@options[:smtp_ip]}:#{@@options[:smtp_port]}"
+    Async::Task.current.reactor.stop
   end
 
   def http_url
     "http://#{@@options[:http_ip]}:#{@@options[:http_port]}#{@@options[:http_path]}"
   end
 
+  protected
+
+  def smtp_url
+    "smtp://#{@@options[:smtp_ip]}:#{@@options[:smtp_port]}"
+  end
+
   def rescue_port port
     begin
       yield
-
-    # XXX: EventMachine only spits out RuntimeError with a string description
-    rescue RuntimeError
-      if $!.to_s =~ /\bno acceptor\b/
-        puts "~~> ERROR: Something's using port #{port}. Are you already running MailCatcher?"
-        puts "==> #{smtp_url}"
-        puts "==> #{http_url}"
-        exit -1
-      else
-        raise
-      end
+    rescue Errno::EADDRINUSE
+      puts "~~> ERROR: Something's using port #{port}. Are you already running MailCatcher?"
+      puts "==> #{smtp_url}"
+      puts "==> #{http_url}"
+      exit(-1)
     end
   end
 end

@@ -2,6 +2,7 @@
 
 require "fileutils"
 require "rubygems"
+require 'rspec/core/rake_task'
 
 require "mail_catcher/version"
 
@@ -52,10 +53,10 @@ RDoc::Task.new(:rdoc => "doc",:clobber_rdoc => "doc:clean", :rerdoc => "doc:forc
   rdoc.rdoc_files.include "lib/**/*.rb"
 end
 
-require "rake/testtask"
+require "rspec/core/rake_task"
 
-Rake::TestTask.new do |task|
-  task.pattern = "spec/*_spec.rb"
+RSpec::Core::RakeTask.new(:test) do |rspec|
+  rspec.rspec_opts = "--format doc"
 end
 
 task :test => :assets
